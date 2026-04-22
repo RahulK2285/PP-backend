@@ -52,6 +52,8 @@ app.use(errorHandler);
 async function start() {
   await connectDB();
 
+    const PORT = process.env.PORT || CONFIG.PORT || 5000;
+
   // Bind to 0.0.0.0 — required by Render and other cloud hosts
   app.listen(CONFIG.PORT, '0.0.0.0', () => {
     console.log(`\n  🚀 PrepForge API running on port ${CONFIG.PORT}`);
