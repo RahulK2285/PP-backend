@@ -48,12 +48,15 @@ app.get('/api/health', (_req, res) => {
 app.use(error_middleware_1.errorHandler);
 // ─── Start Server ───
 async function start() {
-    await (0, db_1.connectDB)();
-    // Bind to 0.0.0.0 — required by Render and other cloud hosts
-    app.listen(constants_1.CONFIG.PORT, '0.0.0.0', () => {
-        console.log(`\n  🚀 PrepForge API running on port ${constants_1.CONFIG.PORT}`);
-        console.log(`  📊 MongoDB: ${constants_1.CONFIG.MONGODB_URI}\n`);
-    });
+  await connectDB();
+
+    const PORT = process.env.PORT || CONFIG.PORT || 5000;
+
+  // Bind to 0.0.0.0 — required by Render and other cloud hosts
+  app.listen(CONFIG.PORT, '0.0.0.0', () => {
+    console.log(`\n  🚀 PrepForge API running on port ${CONFIG.PORT}`);
+    console.log(`  📊 MongoDB: ${CONFIG.MONGODB_URI}\n`);
+  });
 }
 start().catch(console.error);
 //# sourceMappingURL=app.js.map
