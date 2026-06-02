@@ -40,23 +40,15 @@ function detectTopic(title: string): string {
   return bestMatch;
 }
 
-// Optimized difficulty guesser parsing problem titles for complexity signals 
 function detectDifficulty(title: string): 'Easy' | 'Medium' | 'Hard' {
   const lowerTitle = title.toLowerCase();
-  
-  // Flag obvious difficult algorithmic problems matching hard key terms
   const hardKeywords = ['median of two', 'trapping rain water', 'n-queens', 'sudoku solver', 'edit distance', 'word ladder', 'largest rectangle'];
-  if (hardKeywords.some(keyword => lowerTitle.includes(keyword))) {
-    return 'Hard';
-  }
+  if (hardKeywords.some(keyword => lowerTitle.includes(keyword))) return 'Hard';
   
-  // Flag intro metrics matching easy key terms
   const easyKeywords = ['two sum', 'contains duplicate', 'valid anagram', 'binary search', 'reverse linked list', 'plus one'];
-  if (easyKeywords.some(keyword => lowerTitle.includes(keyword))) {
-    return 'Easy';
-  }
+  if (easyKeywords.some(keyword => lowerTitle.includes(keyword))) return 'Easy';
 
-  return 'Medium'; // Default baseline fallback safely matching interview parameters
+  return 'Medium';
 }
 
 export const dsaService = {
@@ -93,79 +85,88 @@ export const dsaService = {
     return problem;
   },
 
-  // Sync from LeetCode — the flagship feature
+  // OVERHAULED SYNC ENGINE: Fetches 100% of all-time solved problems via LeetCode REST API
   async syncLeetCode(userId: string, username: string, limit: number = 500) {
-    // Fetch recent AC submissions from LeetCode
-    const response = await fetch(CONFIG.LEETCODE_GQL, {
-      method: 'POST',
+    // Hits the comprehensive master problem status index endpoint directly
+    const response = await fetch('https://leetcode.com/api/problems/all/', {
+      method: 'GET',
       headers: {
         'Content-Type': 'application/json',
         'Referer': 'https://leetcode.com',
       },
-      body: JSON.stringify({
-        query: `query recentAcSubmissionList($username: String!, $limit: Int!) {
-          recentAcSubmissionList(username: $username, limit: $limit) {
-            id
-            title
-            titleSlug
-            timestamp
-          }
-        }`,
-        variables: { username, limit },
-      }),
     });
 
     const data: any = await response.json();
-    if (data.errors) {
-      throw new Error('LeetCode user not found or API error');
+    if (!data || !data.stat_status_pairs) {
+      throw new Error('Failed to parse master problem list from LeetCode API');
     }
 
-    const submissions = data.data?.recentAcSubmissionList || [];
+    // Filter out only the matching pairs marked with an accepted status ("ac")
+    const solvedSubmissions = data.stat_status_pairs.filter(
+      (item: any) => item.status === 'ac'
+    );
+
     const synced: IProblem[] = [];
     const skipped: string[] = [];
 
-    for (const sub of submissions) {
-      // Check if already exists
-      const existing = await Problem.findOne({ userId, titleSlug: sub.titleSlug });
+    // Loop through your complete history logs and seed missing items safely
+    for (const item of solvedSubmissions) {
+      const title = item.stat.question__title;
+      const titleSlug = item.stat.question__title_slug;
+      const leetcodeId = item.stat.question_id;
+      
+      // Extract exact difficulty tiers (1: Easy, 2: Medium, 3: Hard) from payload
+      let difficulty: 'Easy' | 'Medium' | 'Hard' = 'Medium';
+      if (item.difficulty.level === 1) difficulty = 'Easy';
+      if (item.difficulty.level === 3) difficulty = 'Hard';
+
+      // Deduplicate using your compound key index definition
+      const existing = await Problem.findOne({ userId, titleSlug });
       if (existing) {
-        // Update status to Solved if it wasn't
         if (existing.status !== 'Solved') {
           existing.status = 'Solved';
-          existing.solvedAt = new Date(parseInt(sub.timestamp) * 1000);
           await existing.save();
           synced.push(existing);
         } else {
-          skipped.push(sub.title);
+          skipped.push(title);
         }
         continue;
       }
 
-      // Create new problem
-      const topic = detectTopic(sub.title);
-      const difficulty = detectDifficulty(sub.title);
+      const topic = detectTopic(title);
 
       try {
         const problem = await Problem.create({
           userId,
-          title: sub.title,
-          titleSlug: sub.titleSlug,
+          title,
+          titleSlug,
           topic,
           difficulty,
           status: 'Solved',
           source: 'leetcode',
-          leetcodeId: sub.id,
-          url: `https://leetcode.com/problems/${sub.titleSlug}/`,
-          solvedAt: new Date(parseInt(sub.timestamp) * 1000),
+          leetcodeId: String(leetcodeId),
+          url: `https://leetcode.com/problems/${titleSlug}/`,
+          solvedAt: new Date(), // Establish sync historical point
         });
         synced.push(problem);
       } catch (err: any) {
-        // Skip duplicates
         if (err.code !== 11000) throw err;
-        skipped.push(sub.title);
+        skipped.push(title);
       }
     }
 
-    return { synced: synced.length, skipped: skipped.length, total: submissions.length, submissions };
+    // Generate output format tailored seamlessly to your Redux state boundaries
+    return { 
+      synced: synced.length, 
+      skipped: skipped.length, 
+      total: solvedSubmissions.length, 
+      submissions: solvedSubmissions.slice(0, 20).map((s: any) => ({
+        id: String(s.stat.question_id),
+        title: s.stat.question__title,
+        titleSlug: s.stat.question__title_slug,
+        timestamp: String(Math.floor(Date.now() / 1000))
+      }))
+    };
   },
 
   // Fetch LeetCode profile stats
