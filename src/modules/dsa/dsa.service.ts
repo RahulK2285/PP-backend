@@ -40,9 +40,23 @@ function detectTopic(title: string): string {
   return bestMatch;
 }
 
-// ─── Difficulty detection from title patterns ───
-function detectDifficulty(_title: string): 'Easy' | 'Medium' | 'Hard' {
-  return 'Medium'; // Default — LeetCode API doesn't expose difficulty in recent submissions
+// Optimized difficulty guesser parsing problem titles for complexity signals 
+function detectDifficulty(title: string): 'Easy' | 'Medium' | 'Hard' {
+  const lowerTitle = title.toLowerCase();
+  
+  // Flag obvious difficult algorithmic problems matching hard key terms
+  const hardKeywords = ['median of two', 'trapping rain water', 'n-queens', 'sudoku solver', 'edit distance', 'word ladder', 'largest rectangle'];
+  if (hardKeywords.some(keyword => lowerTitle.includes(keyword))) {
+    return 'Hard';
+  }
+  
+  // Flag intro metrics matching easy key terms
+  const easyKeywords = ['two sum', 'contains duplicate', 'valid anagram', 'binary search', 'reverse linked list', 'plus one'];
+  if (easyKeywords.some(keyword => lowerTitle.includes(keyword))) {
+    return 'Easy';
+  }
+
+  return 'Medium'; // Default baseline fallback safely matching interview parameters
 }
 
 export const dsaService = {
