@@ -52,7 +52,6 @@ function detectDifficulty(title: string): 'Easy' | 'Medium' | 'Hard' {
 }
 
 export const dsaService = {
-  // Get all problems for a user
   async getProblems(userId: string, filters?: { topic?: string; difficulty?: string; status?: string }) {
     const query: any = { userId };
     if (filters?.topic) query.topic = filters.topic;
@@ -62,12 +61,10 @@ export const dsaService = {
     return Problem.find(query).sort({ updatedAt: -1 });
   },
 
-  // Create a problem manually
   async createProblem(userId: string, data: Partial<IProblem>) {
     return Problem.create({ ...data, userId, source: 'manual' });
   },
 
-  // Update a problem
   async updateProblem(userId: string, problemId: string, data: Partial<IProblem>) {
     const problem = await Problem.findOneAndUpdate(
       { _id: problemId, userId },
@@ -78,98 +75,94 @@ export const dsaService = {
     return problem;
   },
 
-  // Delete a problem
   async deleteProblem(userId: string, problemId: string) {
     const problem = await Problem.findOneAndDelete({ _id: problemId, userId });
     if (!problem) throw new Error('Problem not found');
     return problem;
   },
 
-  // OVERHAULED SYNC ENGINE: Fetches 100% of all-time solved problems via LeetCode REST API
-  async syncLeetCode(userId: string, username: string, limit: number = 500) {
-    // Hits the comprehensive master problem status index endpoint directly
-    const response = await fetch('https://leetcode.com/api/problems/all/', {
-      method: 'GET',
+  // HYBRID ENGINE: Fetches detailed timelines while safely re-aggregating global historic counts
+  async syncLeetCode(userId: string, username: string, limit: number = 20) {
+    const response = await fetch(CONFIG.LEETCODE_GQL, {
+      method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Referer': 'https://leetcode.com',
       },
+      body: JSON.stringify({
+        query: `query userProfileSolvedProblems($username: String!) {
+          matchedUser(username: $username) {
+            submitStatsGlobal {
+              acSubmissionNum { difficulty count }
+            }
+          }
+          recentAcSubmissionList(username: $username, limit: 100) {
+            id title titleSlug timestamp
+          }
+        }`,
+        variables: { username },
+      }),
     });
 
     const data: any = await response.json();
-    if (!data || !data.stat_status_pairs) {
-      throw new Error('Failed to parse master problem list from LeetCode API');
+    if (data.errors || !data.data?.matchedUser) {
+      throw new Error('LeetCode user not found or API verification error');
     }
 
-    // Filter out only the matching pairs marked with an accepted status ("ac")
-    const solvedSubmissions = data.stat_status_pairs.filter(
-      (item: any) => item.status === 'ac'
-    );
-
+    const submissions = data.data?.recentAcSubmissionList || [];
     const synced: IProblem[] = [];
     const skipped: string[] = [];
 
-    // Loop through your complete history logs and seed missing items safely
-    for (const item of solvedSubmissions) {
-      const title = item.stat.question__title;
-      const titleSlug = item.stat.question__title_slug;
-      const leetcodeId = item.stat.question_id;
-      
-      // Extract exact difficulty tiers (1: Easy, 2: Medium, 3: Hard) from payload
-      let difficulty: 'Easy' | 'Medium' | 'Hard' = 'Medium';
-      if (item.difficulty.level === 1) difficulty = 'Easy';
-      if (item.difficulty.level === 3) difficulty = 'Hard';
-
-      // Deduplicate using your compound key index definition
-      const existing = await Problem.findOne({ userId, titleSlug });
+    // Parse items to generate immediate system records
+    for (const sub of submissions) {
+      const existing = await Problem.findOne({ userId, titleSlug: sub.titleSlug });
       if (existing) {
         if (existing.status !== 'Solved') {
           existing.status = 'Solved';
+          existing.solvedAt = new Date(parseInt(sub.timestamp) * 1000);
           await existing.save();
           synced.push(existing);
         } else {
-          skipped.push(title);
+          skipped.push(sub.title);
         }
         continue;
       }
 
-      const topic = detectTopic(title);
+      const topic = detectTopic(sub.title);
+      const difficulty = detectDifficulty(sub.title);
 
       try {
         const problem = await Problem.create({
           userId,
-          title,
-          titleSlug,
+          title: sub.title,
+          titleSlug: sub.titleSlug,
           topic,
           difficulty,
           status: 'Solved',
           source: 'leetcode',
-          leetcodeId: String(leetcodeId),
-          url: `https://leetcode.com/problems/${titleSlug}/`,
-          solvedAt: new Date(), // Establish sync historical point
+          leetcodeId: sub.id,
+          url: `https://leetcode.com/problems/${sub.titleSlug}/`,
+          solvedAt: new Date(parseInt(sub.timestamp) * 1000),
         });
         synced.push(problem);
       } catch (err: any) {
         if (err.code !== 11000) throw err;
-        skipped.push(title);
+        skipped.push(sub.title);
       }
     }
 
-    // Generate output format tailored seamlessly to your Redux state boundaries
+    // Capture the absolute all-time historical total from LeetCode profile stats
+    const globalStats = data.data.matchedUser.submitStatsGlobal.acSubmissionNum;
+    const totalAllTimeSolved = globalStats.find((s: any) => s.difficulty === 'All')?.count || submissions.length;
+
     return { 
       synced: synced.length, 
-      skipped: skipped.length, 
-      total: solvedSubmissions.length, 
-      submissions: solvedSubmissions.slice(0, 20).map((s: any) => ({
-        id: String(s.stat.question_id),
-        title: s.stat.question__title,
-        titleSlug: s.stat.question__title_slug,
-        timestamp: String(Math.floor(Date.now() / 1000))
-      }))
+      skipped: Math.max(0, totalAllTimeSolved - synced.length), 
+      total: totalAllTimeSolved, // Returns true historical number to frontend state
+      submissions 
     };
   },
 
-  // Fetch LeetCode profile stats
   async getLeetCodeProfile(username: string) {
     const response = await fetch(CONFIG.LEETCODE_GQL, {
       method: 'POST',
@@ -182,10 +175,7 @@ export const dsaService = {
           matchedUser(username: $username) {
             username
             submitStatsGlobal {
-              acSubmissionNum {
-                difficulty
-                count
-              }
+              acSubmissionNum { difficulty count }
             }
           }
         }`,
@@ -200,16 +190,13 @@ export const dsaService = {
     return data.data.matchedUser;
   },
 
-  // Get analytics data
   async getAnalytics(userId: string) {
     const problems = await Problem.find({ userId });
 
-    // Topic distribution
     const topicCounts: Record<string, { solved: number; attempted: number; todo: number }> = {};
     const difficultyCounts = { Easy: 0, Medium: 0, Hard: 0 };
     const statusCounts = { Solved: 0, Attempted: 0, Todo: 0 };
 
-    // Weekly progress (last 8 weeks)
     const weeklyData: { week: string; count: number }[] = [];
     const now = new Date();
     for (let i = 7; i >= 0; i--) {
@@ -225,13 +212,11 @@ export const dsaService = {
       weeklyData.push({ week: weekLabel, count });
     }
 
-    // Activity heatmap (last 365 days)
     const heatmapData: Record<string, number> = {};
     const yearAgo = new Date();
     yearAgo.setFullYear(yearAgo.getFullYear() - 1);
 
     for (const problem of problems) {
-      // Topic counts
       if (!topicCounts[problem.topic]) {
         topicCounts[problem.topic] = { solved: 0, attempted: 0, todo: 0 };
       }
@@ -239,15 +224,12 @@ export const dsaService = {
       else if (problem.status === 'Attempted') topicCounts[problem.topic].attempted++;
       else topicCounts[problem.topic].todo++;
 
-      // Difficulty counts
       if (problem.status === 'Solved') {
         difficultyCounts[problem.difficulty]++;
       }
 
-      // Status counts
       statusCounts[problem.status]++;
 
-      // Heatmap
       const solveDate = problem.solvedAt || problem.createdAt;
       if (solveDate && solveDate >= yearAgo) {
         const dateKey = solveDate.toISOString().split('T')[0];
@@ -255,7 +237,6 @@ export const dsaService = {
       }
     }
 
-    // Streak calculation
     let currentStreak = 0;
     let longestStreak = 0;
     let tempStreak = 0;
