@@ -5,9 +5,9 @@ import { Problem } from '../dsa/problem.model';
 interface TopicRecommendation {
   topic: string;
   level: 'weak' | 'moderate' | 'strong';
-  solved: number;
-  target: number;
-  percentage: number;
+  solved: number; // Maintained for frontend compatibility
+  target: number; // Maintained for frontend compatibility
+  percentage: number; // Now represents Weighted Mastery Index Score
   suggestions: string[];
 }
 
@@ -145,35 +145,68 @@ const TOPIC_TARGETS: Record<string, number> = {
   'Hash Table': 10, 'Bit Manipulation': 5, 'Math': 5, 'Sorting': 6,
 };
 
+// Difficulty weight map for calculating Mastery Index
+const DIFFICULTY_WEIGHTS = { 'Easy': 1, 'Medium': 3, 'Hard': 5 };
+
 export const recommendationsController = {
   async getRecommendations(req: AuthRequest, res: Response): Promise<void> {
     try {
       const problems = await Problem.find({ userId: req.user!._id, status: 'Solved' });
 
-      // Check if filtering by specific topic
       const filterTopic = req.query.topic as string | undefined;
 
-      // Count solved per topic
-      const solvedByTopic: Record<string, number> = {};
+      // Count solved per topic and store metadata for weighted scores + knowledge decay
+      const topicMetrics: Record<string, { count: number; rawWeight: number; lastSolvedAt: Date | null }> = {};
+      
+      for (const [topic] of Object.entries(TOPIC_TARGETS)) {
+        topicMetrics[topic] = { count: 0, rawWeight: 0, lastSolvedAt: null };
+      }
+
       for (const p of problems) {
-        solvedByTopic[p.topic] = (solvedByTopic[p.topic] || 0) + 1;
+        if (topicMetrics[p.topic]) {
+          topicMetrics[p.topic].count += 1;
+          topicMetrics[p.topic].rawWeight += DIFFICULTY_WEIGHTS[p.difficulty] || 3;
+          
+          const problemDate = p.solvedAt || p.updatedAt;
+          if (problemDate) {
+            const currentLastSolved = topicMetrics[p.topic].lastSolvedAt;
+            if (!currentLastSolved || new Date(problemDate) > currentLastSolved) {
+              topicMetrics[p.topic].lastSolvedAt = new Date(problemDate);
+            }
+          }
+        }
       }
 
       const recommendations: TopicRecommendation[] = [];
 
       for (const [topic, target] of Object.entries(TOPIC_TARGETS)) {
-        // If filtering by topic, only include that topic
         if (filterTopic && topic !== filterTopic) continue;
 
-        const solved = solvedByTopic[topic] || 0;
-        const percentage = Math.round((solved / target) * 100);
-        let level: 'weak' | 'moderate' | 'strong';
+        const metrics = topicMetrics[topic] || { count: 0, rawWeight: 0, lastSolvedAt: null };
+        
+        // 1. Calculate Target weight floor assuming average difficulty profile (Medium = 3 weight units)
+        const targetWeightCapacity = target * 3;
+        let baselinePercentage = Math.round((metrics.rawWeight / targetWeightCapacity) * 100);
+        baselinePercentage = Math.min(baselinePercentage, 100);
 
-        if (percentage < 30) level = 'weak';
-        else if (percentage < 70) level = 'moderate';
+        // 2. Factor in Knowledge Decay (Reduces Mastery Score if left unpracticed for > 14 days)
+        let finalPercentage = baselinePercentage;
+        if (metrics.lastSolvedAt && baselinePercentage > 0) {
+          const daysSinceLastSolved = Math.floor(
+            (Date.now() - metrics.lastSolvedAt.getTime()) / (1000 * 60 * 60 * 24)
+          );
+          if (daysSinceLastSolved > 14) {
+            const decayFactor = Math.min((daysSinceLastSolved - 14) * 1.5, 30); // Max 30% penalty drop
+            finalPercentage = Math.max(Math.round(baselinePercentage - decayFactor), 0);
+          }
+        }
+
+        // Maintain thresholds for level mapping
+        let level: 'weak' | 'moderate' | 'strong';
+        if (finalPercentage < 30) level = 'weak';
+        else if (finalPercentage < 70) level = 'moderate';
         else level = 'strong';
 
-        // Get unresolved suggestions — show up to 10 when filtered, 5 otherwise
         const maxSuggestions = filterTopic ? 10 : 5;
         const allSuggestions = TOPIC_SUGGESTIONS[topic] || [];
         const solvedTitles = problems
@@ -187,14 +220,13 @@ export const recommendationsController = {
         recommendations.push({
           topic,
           level,
-          solved,
+          solved: metrics.count,
           target,
-          percentage: Math.min(percentage, 100),
+          percentage: finalPercentage, // Overridden seamlessly with Weighted Spaced Repetition score
           suggestions: suggestions.length > 0 ? suggestions : ['All suggested problems solved! Keep exploring!'],
         });
       }
 
-      // Sort: weak first, then moderate, then strong
       const order = { weak: 0, moderate: 1, strong: 2 };
       recommendations.sort((a, b) => order[a.level] - order[b.level]);
 
